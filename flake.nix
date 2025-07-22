@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay.url = "github:oxalica/rust-overlay";
     systems = {
       url = "github:nix-systems/default";
@@ -11,50 +10,50 @@
     };
   };
 
-  outputs = inputs @ {flake-parts, ...}:
-    flake-parts.lib.mkFlake {inherit inputs;} {
-      imports = [];
-
-      systems = import inputs.systems;
-
-      perSystem = {
-        config,
-        self',
-        inputs',
-        pkgs,
-        system,
-        lib,
-        ...
-      }: let
-        mkRio = import ./pkgRio.nix;
-
-        mkDevShell = rust-toolchain: let
-          runtimeDeps = self'.packages.rio.runtimeDependencies;
-          tools = self'.packages.rio.nativeBuildInputs ++ self'.packages.rio.buildInputs ++ [rust-toolchain];
-        in
-          pkgs.mkShell {
-            LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath runtimeDeps}";
-            packages = tools ++ [rust-toolchain];
-          };
-      in {
-        _module.args.pkgs = import inputs.nixpkgs {
-          inherit system;
-          overlays = [(import inputs.rust-overlay)];
-        };
-
-        formatter = pkgs.alejandra;
-        packages.default = self'.packages.rio;
-        devShells.default = self'.devShells.msrv;
-
-        apps.default = {
-          type = "app";
-          program = self'.packages.default;
-        };
-        packages.rio = pkgs.callPackage mkRio {rust-toolchain = pkgs.rust-bin.stable.latest.minimal;};
-
-        devShells.msrv = mkDevShell (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
-        devShells.stable = mkDevShell pkgs.rust-bin.stable.latest.default;
-        devShells.nightly = mkDevShell (pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default));
+  outputs = {
+    self,
+    nixpkgs,
+    rust-overlay,
+    systems,
+  }: let
+    inherit (nixpkgs) lib;
+    eachSystem = lib.genAttrs (import systems);
+    pkgsFor = eachSystem (system:
+      import nixpkgs {
+        localSystem.system = system;
+        overlays = [(rust-overlay.overlays.default)];
+      });
+    mkDevShell = pkgs: rust-toolchain: let
+      runtimeDeps = self.packages.${pkgs.hostPlatform.system}.rio.runtimeDependencies;
+      tools = self.packages.${pkgs.hostPlatform.system}.rio.nativeBuildInputs ++ self.packages.${pkgs.hostPlatform.system}.rio.buildInputs ++ [rust-toolchain];
+    in
+      pkgs.mkShell {
+        LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath runtimeDeps}";
+        packages = tools ++ [rust-toolchain];
       };
-    };
+  in {
+    formatter = lib.mapAttrs (_: pkgs: pkgs.alejandra) pkgsFor;
+    packages =
+      lib.mapAttrs (system: pkgs: {
+        default = self.packages.${system}.rio;
+        rio = pkgs.callPackage ./pkgRio.nix {rust-toolchain = pkgs.rust-bin.stable.latest.minimal;};
+      })
+      pkgsFor;
+    devShells =
+      lib.mapAttrs (system: pkgs: {
+        default = self.devShells.${system}.msrv;
+        msrv = mkDevShell pkgs (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+        stable = mkDevShell pkgs pkgs.rust-bin.stable.latest.default;
+        nightly = mkDevShell pkgs (pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default));
+      })
+      pkgsFor;
+    apps =
+      lib.mapAttrs (system: pkgs: {
+        default = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.default;
+        };
+      })
+      pkgsFor;
+  };
 }
